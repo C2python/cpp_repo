@@ -24,12 +24,14 @@
 
 #include "asio_frontend.hpp"
 #include "asio_client.hpp"
+#include "client.hpp"
+#include "client_io_filter.hpp"
+#include "process.hpp"
 
 using tcp = boost::asio::ip::tcp;
 namespace http = boost::beast::http;
 
 using parse_buffer = boost::beast::flat_static_buffer<65536>;
-
 
 /*
 ** Request ID
@@ -42,6 +44,62 @@ std::atomic<int64_t> max_req_id = { 0 };
 auto make_stack_allocator() {
   return boost::context::protected_fixedsize_stack{512*1024};
 }
+
+
+/*
+** ASIO Stream IO
+*/
+
+template <typename Stream>
+class StreamIO : public ClientIO {
+  Stream& stream;
+  boost::asio::yield_context yield;
+  parse_buffer& buffer;
+ public:
+  StreamIO(Stream& stream, parser_type& parser,
+           boost::asio::yield_context yield,
+           parse_buffer& buffer, bool is_ssl,
+           const tcp::endpoint& local_endpoint,
+           const tcp::endpoint& remote_endpoint)
+      : ClientIO(parser, is_ssl, local_endpoint, remote_endpoint),
+         stream(stream), yield(yield), buffer(buffer)
+  {}
+
+  size_t write_data(const char* buf, size_t len) override {
+    boost::system::error_code ec;
+    auto bytes = boost::asio::async_write(stream, boost::asio::buffer(buf, len),
+                                          yield[ec]);
+    if (ec) {
+      std::cout << "write_data failed: " << ec.message() << std::endl;
+      if (ec==boost::asio::error::broken_pipe) {
+        boost::system::error_code ec_ignored;
+        stream.lowest_layer().shutdown(tcp::socket::shutdown_both, ec_ignored);
+      }
+      throw Exception(ec.value(), std::system_category());
+    }
+    return bytes;
+  }
+
+  size_t recv_body(char* buf, size_t max) override {
+    auto& message = parser.get();
+    auto& body_remaining = message.body();
+    body_remaining.data = buf;
+    body_remaining.size = max;
+
+    while (body_remaining.size && !parser.is_done()) {
+      boost::system::error_code ec;
+      http::async_read_some(stream, buffer, parser, yield[ec]);
+      if (ec == http::error::need_buffer) {
+        break;
+      }
+      if (ec) {
+        std::cout << "failed to read body: " << ec.message() << std::endl;
+        throw Exception(ec.value(), std::system_category());
+      }
+    }
+    return max - body_remaining.size;
+  }
+};
 
 /*
 ** output the http version as a string, ie 'HTTP/1.1'
@@ -107,6 +165,9 @@ void handle_connection(boost::asio::io_context& context,
       return;
     }
     auto& message = parser.get();
+    for (auto header = message.begin(); header != message.end(); ++header) {
+      std::cout<<header->name_string()<<": "<<header->value().to_string()<<std::endl;
+    }
     auto& body = parser.get().body();
     if (ec) {
       std::cout << "failed to read header: " << ec.message() << std::endl;
@@ -129,12 +190,28 @@ void handle_connection(boost::asio::io_context& context,
             << http_version{message.version()} << "\" " << ' '
             <<log_header{message, http::field::referer, "\""} << ' '
             << log_header{message, http::field::user_agent, "\""} << ' '
-            << log_header{message, http::field::range} << std::endl;
-
-    if (!parser.keep_alive()) {
+            << log_header{message, http::field::range} <<' '<<"keepalive: "
+            << message[beast::http::field::keep_alive]<< std::endl;
+    bool is_ssl = false;
+    StreamIO clientio{stream, parser, yield, buffer, is_ssl,
+                      socket.local_endpoint(),
+                      remote_endpoint};
+    clientio.init_env();
+    auto real_client_io = add_reordering(
+                            add_chunking(
+                              add_conlen_controlling(
+                                &clientio)));
+    int http_ret = 0;
+    process(message.method(),&clientio,yield,http_ret);
+    if (http_ret < 0){
       return;
     }
-    /*
+    if (!parser.keep_alive()) {
+      return;
+    }else{
+      std::cout<<"Keep-alive"<<std::endl;
+    }
+    
     while (!parser.is_done()) {
       static std::array<char, 1024> discard_buffer;
 
@@ -154,7 +231,6 @@ void handle_connection(boost::asio::io_context& context,
         return;
       }
     }
-    */
   }
 }
 
