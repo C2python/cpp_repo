@@ -1,5 +1,5 @@
 /**
- * Provide abstract thread interface
+ * Provide abstract std::thread interface
  * 
  * 
 **/
@@ -9,11 +9,12 @@
 
 #include <thread>
 #include <memory>
+#include <string>
 
 class UPThread: public std::enable_shared_from_this<UPThread>{
 public:
   std::thread::id t_id;
-  //std::string t_name;
+  std::string t_name;
 
   std::thread handle;
 
@@ -25,8 +26,8 @@ public:
   UPThread(UPThread&&)=default;
   UPThread& operator=(UPThread&&)=default;
 
-  void create(const char* name){
-    //t_name = name;
+  void create(std::string name=""){
+    t_name = name;
     auto self = shared_from_this();
     handle = std::thread(&UPThread::entry,this,self);
   }

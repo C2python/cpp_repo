@@ -66,7 +66,7 @@ prebuffer::int_type prebuffer::overflow(int_type c){
       return -1; 
     }
 
-  return c;
+  return std::char_traits<char>::not_eof(c);
 }
 
 int prebuffer::flushoutput(){
