@@ -6,6 +6,7 @@ import time
 from kazoo.client import KazooClient
 from kazoo.client import KazooState
 import logging
+from kazoo import exceptions as kazoo_excpt
 
 LOG = logging.getLogger(__name__)
 
@@ -74,7 +75,8 @@ class HAMaster(object):
 
     def __init__(self,conf,zk,scheduler):
         self.conf = conf
-        self.path = "/updns/master"
+        self.path = "/updns/master/role"
+        self.master_path = "/updns/master/prompt"
         self.is_leader = False
         self.zk = zk
         self.scheduler = scheduler
@@ -106,7 +108,8 @@ class HAMaster(object):
 
     def _elect(self):
         instance_list = self.zk.get_children(path=self.path, watch=self.my_watch)
-        instance = max(instance_list).split("-by-")[0]
+        node_list = [(ins.split("-by-")[1],ins.split("-by-")[0]) for ins in instance_list]
+        instance = min(node_list)[1]
         if instance == self.scheduler.member_id:
             if not self.is_leader:
                 LOG.info("Elected as master, work_id: %s." % self.scheduler.member_id)
